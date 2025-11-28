@@ -1,4 +1,4 @@
-const GEMINI_API_KEY = process.env.GEMINI_API_KEY || "AIzaSyC8FedFY_QXQ7Nptp42UpBRtBJ2AKZ6ydI"; 
+const GEMINI_API_KEY = process.env.GEMINI_API_KEY ; 
 
 const express = require('express');
 const cors = require('cors');
@@ -510,4 +510,5 @@ app.get('/', (req, res) => {
 
 app.listen(port, () => {
     console.log(`Server running at http://localhost:${port}`);
+
 });
