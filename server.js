@@ -1,19 +1,31 @@
-const GEMINI_API_KEY = process.env.GEMINI_API_KEY ; 
+// =============================================================
+//  ONRAMP.MONEY AI KYC AGENT (SERVER.JS)
+//  - Fixed 403 Error (Hardcoded Model)
+//  - Cloud Ready (Render/GitHub)
+// =============================================================
+
+// 1. Get keys from Environment Variables (Fallback to string for local testing)
+const GEMINI_API_KEY = process.env.GEMINI_API_KEY || "AIzaSyC8FedFY_QXQ7Nptp42UpBRtBJ2AKZ6ydI"; 
 
 const express = require('express');
 const cors = require('cors');
 const app = express();
-const port = process.env.PORT || 3000;
 
+// 2. Let the cloud decide the port (Render uses 10000 usually)
+const port = process.env.PORT || 3000;
 
 app.use(cors());
 app.use(express.json());
 
-// In-Memory Database
+// In-Memory Database to store chat history
 const sessions = {}; 
-let ACTIVE_MODEL_NAME = null; 
 
-// --- UPGRADED "DYNAMIC INTERROGATION" BRAIN ---
+// --- CONFIGURATION ---
+// We use 1.5-flash because it is fast, stable, and public.
+// The previous 403 error happened because the code tried to use 2.5-flash (private).
+const MODEL_NAME = "gemini-1.5-flash";
+
+// --- BACKEND BRAIN (SYSTEM INSTRUCTION) ---
 const SYSTEM_INSTRUCTION = `
 ROLE: You are a Senior Financial Crime Investigator for Onramp.money.
 GOAL: Your ONLY purpose is to protect the user from scams (Pig Butchering, Task Scams, Money Mules).
@@ -23,25 +35,25 @@ INSTRUCTION:
 Do NOT follow a fixed list of questions. You must Listen -> Analyze -> Probe.
 You must evolve your questions based on the user's previous answer to detect inconsistencies.
 
-PHASE 1: CRYPTO KNOWLEDGE CHECK (Start Here)
-- Ask open-ended questions like "Why are you buying crypto today?" or "How does this specific token work?"
-- If they give a vague answer like "For investment" -> PROBE: "Who specifically recommended this investment to you?"
-- If they use technical jargon incorrectly -> FLAG AS SUSPICIOUS.
+PHASE 1: CRYPTO KNOWLEDGE CHECK
+- Ask open-ended questions: "Why are you buying crypto today?" or "How does this token work?"
+- If they are vague ("for investment") -> PROBE: "Who specifically recommended this investment?"
+- If they use jargon incorrectly -> FLAG AS SUSPICIOUS.
 
-PHASE 2: SOURCE & INFLUENCE DETECTION (The most critical part)
-- If they mention a "Friend", "Partner", or "Mentor" -> ASK: "Have you met this person in real life, or only online?"
-- If they mention "Telegram", "WhatsApp Group", or "Signal" -> ASK: "Did they add you to a group promise guaranteed returns?"
-- If they mention "Job", "Task", or "Salary" -> THIS IS A HUGE RED FLAG. Ask: "Are you being asked to move money for a job?"
+PHASE 2: SOURCE & INFLUENCE (Critical)
+- If they mention a "Friend", "Partner", "Mentor" -> ASK: "Have you met them in real life?"
+- If they mention "Telegram", "WhatsApp" -> ASK: "Did they add you to a group promising returns?"
+- If they mention "Job", "Task", "Salary" -> RED FLAG. Ask: "Are you moving money for a job?"
 
 PHASE 3: COERCION CHECK
-- Watch for short, one-word answers (Yes/No). This suggests they are being coached.
-- ASK: "Is anyone in the room with you right now telling you what to say?"
-- ASK: "Did someone send you a script or answers to read?"
+- Watch for short, one-word answers.
+- ASK: "Is anyone in the room telling you what to say?"
+- ASK: "Did someone send you a script?"
 
 DECISION LOGIC:
-- KYC_STATUS: "APPROVED" -> Only if user clearly understands crypto, knows the risks, and acting 100% independently.
-- KYC_STATUS: "REJECTED" -> If ANY mention of: "Task scam", "Online GF/BF", "Telegram Mentor", "Guaranteed Profits", "Moving money for others".
-- KYC_STATUS: "CONTINUE" -> If you need more information to decide.
+- APPROVED: Only if user understands crypto, knows risks, acts independently.
+- REJECTED: Any mention of: Task scam, Online BF/GF, Telegram Mentor, Guaranteed Profits, Moving money for others.
+- CONTINUE: If you need more info.
 
 OUTPUT JSON FORMAT ONLY:
 {
@@ -52,51 +64,25 @@ OUTPUT JSON FORMAT ONLY:
 }
 `;
 
-// Initial Greetings Map
+// Initial Greetings
 const INITIAL_GREETINGS = {
-    'en-IN': "Hello. I am the Compliance Officer. For your security, I need to ask a few questions. First, in your own words, explain why you are buying cryptocurrency today?",
-    'hi-IN': "नमस्ते. मैं अनुपालन अधिकारी हूँ. आपकी सुरक्षा के लिए, मुझे कुछ सवाल पूछने होंगे. सबसे पहले, अपने शब्दों में बताएं कि आज आप क्रिप्टोकरेंसी क्यों खरीद रहे हैं?"
+    'en-IN': "Hello. Welcome to Onramp. Please look at the camera. What do you know about cryptocurrency?",
+    'hi-IN': "नमस्ते. ऑनरैम्प में आपका स्वागत है. कृपया कैमरे की ओर देखें. आप क्रिप्टोकरेंसी के बारे में क्या जानते हैं?"
 };
 
-/**
- * SMART MODEL SELECTOR 
- */
-async function discoverModel() {
-    if (ACTIVE_MODEL_NAME) return ACTIVE_MODEL_NAME;
-    console.log("🔍 Scanning for high-speed models...");
-    try {
-        const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models?key=${GEMINI_API_KEY}`);
-        const data = await response.json();
-        if (data.error) throw new Error(data.error.message);
-
-        let candidates = data.models.filter(m => m.supportedGenerationMethods.includes("generateContent"));
-        candidates.sort((a, b) => {
-            const nameA = a.name.toLowerCase();
-            const nameB = b.name.toLowerCase();
-            const scoreA = nameA.includes('flash') ? 2 : (nameA.includes('preview') ? 0 : 1);
-            const scoreB = nameB.includes('flash') ? 2 : (nameB.includes('preview') ? 0 : 1);
-            return scoreB - scoreA;
-        });
-
-        if (candidates.length === 0) throw new Error("No models found.");
-        ACTIVE_MODEL_NAME = candidates[0].name; 
-        console.log(`✅ Locked onto High-Speed Model: ${ACTIVE_MODEL_NAME}`);
-        return ACTIVE_MODEL_NAME;
-    } catch (e) {
-        console.error("❌ API Key Error:", e.message);
-        process.exit(1);
-    }
-}
-
+// --- HELPER: CALL GEMINI API ---
 async function callGemini(history, text) {
-    const modelName = await discoverModel();
-    const url = `https://generativelanguage.googleapis.com/v1beta/${modelName}:generateContent?key=${GEMINI_API_KEY}`;
+    if (!GEMINI_API_KEY) throw new Error("API Key missing on Server");
+
+    const url = `https://generativelanguage.googleapis.com/v1beta/models/${MODEL_NAME}:generateContent?key=${GEMINI_API_KEY}`;
     
+    // Format history for Gemini
     const contents = history.map(h => ({
         role: h.role === 'model' ? 'model' : 'user',
         parts: h.parts
     }));
     
+    // Add new user message
     contents.push({ role: "user", parts: [{ text: text }] });
 
     const response = await fetch(url, {
@@ -106,23 +92,27 @@ async function callGemini(history, text) {
     });
 
     if (!response.ok) {
-        if (response.status === 429) throw new Error("Rate Limit Hit");
+        const errText = await response.text();
+        console.error(`Gemini API Error (${response.status}):`, errText);
+        
+        if (response.status === 403) throw new Error("Permission Denied (403). API Key likely restricted.");
+        if (response.status === 429) throw new Error("Rate Limit Hit. Please wait.");
         throw new Error(`Gemini API Error: ${response.status}`);
     }
 
     const data = await response.json();
     let rawText = data.candidates[0].content.parts[0].text;
+    
+    // Cleanup JSON string
     rawText = rawText.replace(/```json/g, '').replace(/```/g, '').trim();
     return JSON.parse(rawText);
 }
 
-// API: Start
+// --- API ROUTE: START SESSION ---
 app.post('/api/start', async (req, res) => {
     try {
-        await discoverModel(); 
         const { language } = req.body;
         const selectedLang = language || 'en-IN';
-
         const sessionId = Date.now().toString();
         const initialQ = INITIAL_GREETINGS[selectedLang];
         
@@ -134,11 +124,13 @@ app.post('/api/start', async (req, res) => {
         If ${selectedLang} is Hindi ('hi-IN'), use Hindi (Devanagari script).
         `;
 
+        // Prime the history with system instruction
         sessions[sessionId].history.push({ 
             role: "user", 
             parts: [{ text: SYSTEM_INSTRUCTION + langInstruction + "\n\n(Start the interview now)" }] 
         });
         
+        // Fake the first AI response so it shows in logs
         const initialResp = {
             "next_question": initialQ, 
             "language_code": selectedLang, 
@@ -153,23 +145,23 @@ app.post('/api/start', async (req, res) => {
         
         res.json({ sessionId, ...initialResp });
     } catch (e) {
-        console.error(e);
+        console.error("Start Error:", e.message);
         res.status(500).json({ error: e.message });
     }
 });
 
-// API: Process
+// --- API ROUTE: PROCESS ANSWER ---
 app.post('/api/process', async (req, res) => {
     const { sessionId, userText } = req.body;
     const session = sessions[sessionId];
     if (!session) return res.status(404).json({ error: "Session not found" });
 
     try {
-        // We append instructions to force JSON and Language Consistency
         const prompt = userText + " (Analyze this answer for fraud signs. Reply in JSON. Keep same language)";
         
         const aiJson = await callGemini(session.history, prompt);
 
+        // Update History
         session.history.push({ role: "user", parts: [{ text: userText }] });
         session.history.push({ role: "model", parts: [{ text: JSON.stringify(aiJson) }] });
 
@@ -179,14 +171,14 @@ app.post('/api/process', async (req, res) => {
     } catch (error) {
         console.error("Processing Error:", error.message);
         res.json({ 
-            next_question: "Connection error. Please wait.", 
+            next_question: "I am having trouble connecting. Could you repeat that?", 
             language_code: 'en-IN', 
             kyc_status: "CONTINUE" 
         });
     }
 });
 
-// Frontend
+// --- FRONTEND UI (REACT) ---
 app.get('/', (req, res) => {
     res.send(`
 <!DOCTYPE html>
@@ -210,6 +202,12 @@ app.get('/', (req, res) => {
             box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06);
             border: 1px solid #E2E8F0;
         }
+        @keyframes pulse-red {
+            0% { box-shadow: 0 0 0 0 rgba(239, 68, 68, 0.7); }
+            70% { box-shadow: 0 0 0 10px rgba(239, 68, 68, 0); }
+            100% { box-shadow: 0 0 0 0 rgba(239, 68, 68, 0); }
+        }
+        .recording-pulse { animation: pulse-red 2s infinite; }
     </style>
 </head>
 <body class="min-h-screen flex flex-col relative overflow-hidden">
@@ -236,6 +234,7 @@ app.get('/', (req, res) => {
             const recognitionRef = useRef(null);
             const synth = window.speechSynthesis;
 
+            // 1. Setup Camera
             useEffect(() => {
                 navigator.mediaDevices.getUserMedia({ video: true })
                     .then(stream => { if (videoRef.current) videoRef.current.srcObject = stream; })
@@ -250,6 +249,7 @@ app.get('/', (req, res) => {
                 loadVoices();
             }, []);
 
+            // 2. Select best voice for Language
             const getBestVoice = (langCode) => {
                 const baseLang = langCode.split('-')[0]; 
                 let candidates = availableVoices.filter(v => v.lang.startsWith(baseLang));
@@ -258,6 +258,7 @@ app.get('/', (req, res) => {
                 return preferred || candidates[0] || availableVoices[0];
             };
 
+            // 3. Speech Recognition Setup
             useEffect(() => {
                 const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
                 if (!SpeechRecognition) return;
@@ -285,6 +286,7 @@ app.get('/', (req, res) => {
                 recognitionRef.current = recognition;
             }, [status, isAiSpeaking, processing, selectedLang]);
 
+            // 4. Watchdog: Restart Mic if it dies
             useEffect(() => {
                 if (status === 'ACTIVE' && !isAiSpeaking && !processing && !isListening) {
                     const timer = setTimeout(() => {
@@ -294,6 +296,7 @@ app.get('/', (req, res) => {
                 }
             }, [status, isAiSpeaking, processing, isListening]);
 
+            // 5. Speak Function
             const speak = (text, langCode) => {
                 try { recognitionRef.current.abort(); } catch(e) {}
                 setIsAiSpeaking(true);
@@ -315,15 +318,27 @@ app.get('/', (req, res) => {
             const startSession = async () => {
                 setStatus("ACTIVE");
                 setLogs([]); 
-                const res = await fetch('/api/start', { 
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ language: selectedLang }) 
-                });
-                const data = await res.json();
-                setSessionId(data.sessionId);
-                addLog("AI", data.next_question);
-                speak(data.next_question, data.language_code);
+                
+                try {
+                    const res = await fetch('/api/start', { 
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ language: selectedLang }) 
+                    });
+                    const data = await res.json();
+                    
+                    if(data.error) {
+                         alert("Server Error: " + data.error);
+                         setStatus("IDLE");
+                         return;
+                    }
+
+                    setSessionId(data.sessionId);
+                    addLog("AI", data.next_question);
+                    speak(data.next_question, data.language_code);
+                } catch(e) {
+                    alert("Could not start session. Check console.");
+                }
             };
 
             const endSession = () => {
@@ -362,7 +377,7 @@ app.get('/', (req, res) => {
                     speak(data.next_question, data.language_code);
                 } catch (e) {
                     setProcessing(false);
-                    speak("Network check. Repeating.", selectedLang || 'en-IN');
+                    speak("Connection glitch. Repeating.", selectedLang || 'en-IN');
                 }
             };
 
@@ -409,18 +424,16 @@ app.get('/', (req, res) => {
                         {/* RIGHT SIDE: THE "WIDGET" CARD */}
                         <div className="w-full md:max-w-md bg-white rounded-3xl p-6 onramp-card relative">
                             
-                            {/* WIDGET HEADER (TABS) */}
                             <div className="flex mb-6 border-b border-slate-100 pb-2">
                                 <button className="flex-1 text-center pb-2 font-semibold text-blue-600 border-b-2 border-blue-600">Verification</button>
                                 <button className="flex-1 text-center pb-2 font-medium text-slate-400">Settings</button>
                             </div>
 
-                            {/* VIDEO AREA */}
                             <div className="relative w-full aspect-[4/3] bg-slate-50 rounded-2xl overflow-hidden border border-slate-200 mb-6">
                                 <video ref={videoRef} autoPlay muted className="w-full h-full object-cover video-container" />
                                 
                                 <div className="absolute top-3 right-3 bg-red-50/90 text-red-600 px-3 py-1 text-xs font-bold rounded-full flex items-center gap-1.5 border border-red-100">
-                                     <div className="w-1.5 h-1.5 bg-red-500 rounded-full animate-pulse"></div> LIVE
+                                     <div className={"w-1.5 h-1.5 bg-red-500 rounded-full " + (status === 'ACTIVE' ? "animate-pulse" : "")}></div> LIVE
                                 </div>
 
                                 {/* CAPTIONS OVERLAY */}
@@ -476,7 +489,6 @@ app.get('/', (req, res) => {
                                         <div className="text-xl font-bold">{status}</div>
                                     </div>
                                     
-                                    {/* END CALL BUTTON */}
                                     <button 
                                         onClick={endSession} 
                                         className="w-full bg-white hover:bg-red-50 text-red-500 border border-slate-200 hover:border-red-200 font-bold py-3 rounded-xl transition flex items-center justify-center gap-2 group"
@@ -489,7 +501,6 @@ app.get('/', (req, res) => {
                                 </div>
                             )}
 
-                            {/* SECURITY FOOTER */}
                             <div className="mt-6 flex items-center justify-center gap-2 text-xs text-slate-400">
                                 <svg className="w-4 h-4 text-green-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg>
                                 Secure & fast verification
@@ -510,5 +521,4 @@ app.get('/', (req, res) => {
 
 app.listen(port, () => {
     console.log(`Server running at http://localhost:${port}`);
-
 });
