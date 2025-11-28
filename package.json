@@ -1,18 +1,16 @@
 {
-  "name": "new",
+  "name": "onramp-kyc-agent",
   "version": "1.0.0",
-  "description": "",
-  "main": "kyc-demo.js",
-  "bin": "kyc-demo.js",
+  "description": "AI Video KYC Agent",
+  "main": "server.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "start": "node server.js"
   },
-  "keywords": [],
-  "author": "",
-  "license": "ISC",
-  "type": "commonjs",
   "dependencies": {
-    "cors": "^2.8.5",
-    "express": "^5.1.0"
+    "express": "^4.18.2",
+    "cors": "^2.8.5"
+  },
+  "engines": {
+    "node": ">=18.0.0"
   }
 }
