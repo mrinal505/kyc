@@ -1,11 +1,10 @@
 // =============================================================
 //  ONRAMP.MONEY AI KYC AGENT (SERVER.JS)
-//  - Fixed 404 Error (Smart Fallback System)
+//  - Fixed 429 Rate Limit (Forced usage of 1.5-Flash)
 //  - Cloud Ready (Render/GitHub)
 // =============================================================
 
-// 1. Get keys from Environment Variables
-const GEMINI_API_KEY = process.env.GEMINI_API_KEY; 
+const GEMINI_API_KEY = process.env.GEMINI_API_KEY || "AIzaSyC8FedFY_QXQ7Nptp42UpBRtBJ2AKZ6ydI"; 
 
 const express = require('express');
 const cors = require('cors');
@@ -18,7 +17,12 @@ app.use(express.json());
 
 // In-Memory Database
 const sessions = {}; 
-let ACTIVE_MODEL_NAME = null; 
+
+// --- CONFIGURATION ---
+// STRICTLY use 'gemini-1.5-flash'.
+// Do not use 'pro' or '2.5' as they have very low rate limits (2 RPM).
+// Flash has 15 RPM (Requests Per Minute).
+const MODEL_NAME = "gemini-1.5-flash";
 
 // --- BACKEND BRAIN ---
 const SYSTEM_INSTRUCTION = `
@@ -64,54 +68,11 @@ const INITIAL_GREETINGS = {
     'hi-IN': "नमस्ते. ऑनरैम्प में आपका स्वागत है. कृपया कैमरे की ओर देखें. आप क्रिप्टोकरेंसी के बारे में क्या जानते हैं?"
 };
 
-// --- ROBUST MODEL DISCOVERY (Fixes 404/403) ---
-async function discoverModel() {
-    if (ACTIVE_MODEL_NAME) return ACTIVE_MODEL_NAME;
-    console.log("🔍 Scanning for available models...");
-    
-    try {
-        const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models?key=${GEMINI_API_KEY}`);
-        const data = await response.json();
-        
-        if (data.error) throw new Error(data.error.message);
-
-        // Filter: Must support generating content
-        const candidates = data.models.filter(m => 
-            m.supportedGenerationMethods.includes("generateContent")
-        );
-
-        // PRIORITY LOGIC:
-        // 1. Look for 'gemini-1.5-flash' (Fastest)
-        // 2. Look for 'gemini-1.5-pro' (Smartest)
-        // 3. Look for 'gemini-pro' (Old Reliable)
-        
-        let bestModel = candidates.find(m => m.name.includes("gemini-1.5-flash"));
-        if (!bestModel) bestModel = candidates.find(m => m.name.includes("gemini-1.5-pro"));
-        if (!bestModel) bestModel = candidates.find(m => m.name.includes("gemini-pro"));
-        if (!bestModel) bestModel = candidates[0]; // Desperation fallback
-
-        if (!bestModel) throw new Error("No compatible Gemini models found for this API Key.");
-
-        // Fix: The API returns "models/gemini-pro", but strictly we just need the name sometimes
-        // We will stick to the full name provided by the API to be safe.
-        // Usually 'models/gemini-1.5-flash'
-        ACTIVE_MODEL_NAME = bestModel.name.replace("models/", ""); 
-        
-        console.log(`✅ Connected to Model: ${ACTIVE_MODEL_NAME}`);
-        return ACTIVE_MODEL_NAME;
-
-    } catch (e) {
-        console.error("❌ Model Discovery Failed:", e.message);
-        // Ultimate Fallback if discovery fails (usually works)
-        return "gemini-pro";
-    }
-}
-
+// --- GEMINI API CALLER ---
 async function callGemini(history, text) {
     if (!GEMINI_API_KEY) throw new Error("API Key missing on Server");
 
-    const modelName = await discoverModel();
-    const url = `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent?key=${GEMINI_API_KEY}`;
+    const url = `https://generativelanguage.googleapis.com/v1beta/models/${MODEL_NAME}:generateContent?key=${GEMINI_API_KEY}`;
     
     const contents = history.map(h => ({
         role: h.role === 'model' ? 'model' : 'user',
@@ -130,11 +91,8 @@ async function callGemini(history, text) {
         const errText = await response.text();
         console.error(`Gemini API Error (${response.status}):`, errText);
         
-        // If 404 happens again, force reset the model name to try again next time
-        if (response.status === 404) ACTIVE_MODEL_NAME = null; 
-        
-        if (response.status === 403) throw new Error("Permission Denied (403). API Key likely restricted.");
-        if (response.status === 429) throw new Error("Rate Limit Hit. Please wait.");
+        if (response.status === 429) throw new Error("Server is busy (Rate Limit). Please wait 10 seconds.");
+        if (response.status === 403) throw new Error("Permission Denied. API Key issue.");
         throw new Error(`Gemini API Error: ${response.status}`);
     }
 
@@ -147,9 +105,6 @@ async function callGemini(history, text) {
 // --- API ROUTE: START ---
 app.post('/api/start', async (req, res) => {
     try {
-        // Pre-fetch model to ensure readiness
-        await discoverModel();
-
         const { language } = req.body;
         const selectedLang = language || 'en-IN';
         const sessionId = Date.now().toString();
@@ -206,8 +161,10 @@ app.post('/api/process', async (req, res) => {
 
     } catch (error) {
         console.error("Processing Error:", error.message);
+        
+        // Return a safe JSON so the frontend doesn't crash
         res.json({ 
-            next_question: "I am having trouble connecting. Could you repeat that?", 
+            next_question: "The system is busy. Please repeat your answer in 5 seconds.", 
             language_code: 'en-IN', 
             kyc_status: "CONTINUE" 
         });
