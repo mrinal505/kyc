@@ -1,31 +1,26 @@
 // =============================================================
 //  ONRAMP.MONEY AI KYC AGENT (SERVER.JS)
-//  - Fixed 403 Error (Hardcoded Model)
+//  - Fixed 404 Error (Smart Fallback System)
 //  - Cloud Ready (Render/GitHub)
 // =============================================================
 
-// 1. Get keys from Environment Variables (Fallback to string for local testing)
+// 1. Get keys from Environment Variables
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY; 
 
 const express = require('express');
 const cors = require('cors');
 const app = express();
 
-// 2. Let the cloud decide the port (Render uses 10000 usually)
 const port = process.env.PORT || 3000;
 
 app.use(cors());
 app.use(express.json());
 
-// In-Memory Database to store chat history
+// In-Memory Database
 const sessions = {}; 
+let ACTIVE_MODEL_NAME = null; 
 
-// --- CONFIGURATION ---
-// We use 1.5-flash because it is fast, stable, and public.
-// The previous 403 error happened because the code tried to use 2.5-flash (private).
-const MODEL_NAME = "gemini-1.5-flash";
-
-// --- BACKEND BRAIN (SYSTEM INSTRUCTION) ---
+// --- BACKEND BRAIN ---
 const SYSTEM_INSTRUCTION = `
 ROLE: You are a Senior Financial Crime Investigator for Onramp.money.
 GOAL: Your ONLY purpose is to protect the user from scams (Pig Butchering, Task Scams, Money Mules).
@@ -64,25 +59,65 @@ OUTPUT JSON FORMAT ONLY:
 }
 `;
 
-// Initial Greetings
 const INITIAL_GREETINGS = {
     'en-IN': "Hello. Welcome to Onramp. Please look at the camera. What do you know about cryptocurrency?",
     'hi-IN': "नमस्ते. ऑनरैम्प में आपका स्वागत है. कृपया कैमरे की ओर देखें. आप क्रिप्टोकरेंसी के बारे में क्या जानते हैं?"
 };
 
-// --- HELPER: CALL GEMINI API ---
+// --- ROBUST MODEL DISCOVERY (Fixes 404/403) ---
+async function discoverModel() {
+    if (ACTIVE_MODEL_NAME) return ACTIVE_MODEL_NAME;
+    console.log("🔍 Scanning for available models...");
+    
+    try {
+        const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models?key=${GEMINI_API_KEY}`);
+        const data = await response.json();
+        
+        if (data.error) throw new Error(data.error.message);
+
+        // Filter: Must support generating content
+        const candidates = data.models.filter(m => 
+            m.supportedGenerationMethods.includes("generateContent")
+        );
+
+        // PRIORITY LOGIC:
+        // 1. Look for 'gemini-1.5-flash' (Fastest)
+        // 2. Look for 'gemini-1.5-pro' (Smartest)
+        // 3. Look for 'gemini-pro' (Old Reliable)
+        
+        let bestModel = candidates.find(m => m.name.includes("gemini-1.5-flash"));
+        if (!bestModel) bestModel = candidates.find(m => m.name.includes("gemini-1.5-pro"));
+        if (!bestModel) bestModel = candidates.find(m => m.name.includes("gemini-pro"));
+        if (!bestModel) bestModel = candidates[0]; // Desperation fallback
+
+        if (!bestModel) throw new Error("No compatible Gemini models found for this API Key.");
+
+        // Fix: The API returns "models/gemini-pro", but strictly we just need the name sometimes
+        // We will stick to the full name provided by the API to be safe.
+        // Usually 'models/gemini-1.5-flash'
+        ACTIVE_MODEL_NAME = bestModel.name.replace("models/", ""); 
+        
+        console.log(`✅ Connected to Model: ${ACTIVE_MODEL_NAME}`);
+        return ACTIVE_MODEL_NAME;
+
+    } catch (e) {
+        console.error("❌ Model Discovery Failed:", e.message);
+        // Ultimate Fallback if discovery fails (usually works)
+        return "gemini-pro";
+    }
+}
+
 async function callGemini(history, text) {
     if (!GEMINI_API_KEY) throw new Error("API Key missing on Server");
 
-    const url = `https://generativelanguage.googleapis.com/v1beta/models/${MODEL_NAME}:generateContent?key=${GEMINI_API_KEY}`;
+    const modelName = await discoverModel();
+    const url = `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent?key=${GEMINI_API_KEY}`;
     
-    // Format history for Gemini
     const contents = history.map(h => ({
         role: h.role === 'model' ? 'model' : 'user',
         parts: h.parts
     }));
     
-    // Add new user message
     contents.push({ role: "user", parts: [{ text: text }] });
 
     const response = await fetch(url, {
@@ -95,6 +130,9 @@ async function callGemini(history, text) {
         const errText = await response.text();
         console.error(`Gemini API Error (${response.status}):`, errText);
         
+        // If 404 happens again, force reset the model name to try again next time
+        if (response.status === 404) ACTIVE_MODEL_NAME = null; 
+        
         if (response.status === 403) throw new Error("Permission Denied (403). API Key likely restricted.");
         if (response.status === 429) throw new Error("Rate Limit Hit. Please wait.");
         throw new Error(`Gemini API Error: ${response.status}`);
@@ -102,15 +140,16 @@ async function callGemini(history, text) {
 
     const data = await response.json();
     let rawText = data.candidates[0].content.parts[0].text;
-    
-    // Cleanup JSON string
     rawText = rawText.replace(/```json/g, '').replace(/```/g, '').trim();
     return JSON.parse(rawText);
 }
 
-// --- API ROUTE: START SESSION ---
+// --- API ROUTE: START ---
 app.post('/api/start', async (req, res) => {
     try {
+        // Pre-fetch model to ensure readiness
+        await discoverModel();
+
         const { language } = req.body;
         const selectedLang = language || 'en-IN';
         const sessionId = Date.now().toString();
@@ -124,13 +163,11 @@ app.post('/api/start', async (req, res) => {
         If ${selectedLang} is Hindi ('hi-IN'), use Hindi (Devanagari script).
         `;
 
-        // Prime the history with system instruction
         sessions[sessionId].history.push({ 
             role: "user", 
             parts: [{ text: SYSTEM_INSTRUCTION + langInstruction + "\n\n(Start the interview now)" }] 
         });
         
-        // Fake the first AI response so it shows in logs
         const initialResp = {
             "next_question": initialQ, 
             "language_code": selectedLang, 
@@ -150,7 +187,7 @@ app.post('/api/start', async (req, res) => {
     }
 });
 
-// --- API ROUTE: PROCESS ANSWER ---
+// --- API ROUTE: PROCESS ---
 app.post('/api/process', async (req, res) => {
     const { sessionId, userText } = req.body;
     const session = sessions[sessionId];
@@ -161,11 +198,10 @@ app.post('/api/process', async (req, res) => {
         
         const aiJson = await callGemini(session.history, prompt);
 
-        // Update History
         session.history.push({ role: "user", parts: [{ text: userText }] });
         session.history.push({ role: "model", parts: [{ text: JSON.stringify(aiJson) }] });
 
-        console.log(`[${sessionId}] User: "${userText}" -> AI: "${aiJson.next_question}" (Risk: ${aiJson.risk_flag})`);
+        console.log(`[${sessionId}] User: "${userText}" -> AI: "${aiJson.next_question}"`);
         res.json(aiJson);
 
     } catch (error) {
@@ -178,7 +214,7 @@ app.post('/api/process', async (req, res) => {
     }
 });
 
-// --- FRONTEND UI (REACT) ---
+// --- FRONTEND UI ---
 app.get('/', (req, res) => {
     res.send(`
 <!DOCTYPE html>
@@ -249,7 +285,7 @@ app.get('/', (req, res) => {
                 loadVoices();
             }, []);
 
-            // 2. Select best voice for Language
+            // 2. Select best voice
             const getBestVoice = (langCode) => {
                 const baseLang = langCode.split('-')[0]; 
                 let candidates = availableVoices.filter(v => v.lang.startsWith(baseLang));
@@ -258,7 +294,7 @@ app.get('/', (req, res) => {
                 return preferred || candidates[0] || availableVoices[0];
             };
 
-            // 3. Speech Recognition Setup
+            // 3. Speech Recognition
             useEffect(() => {
                 const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
                 if (!SpeechRecognition) return;
@@ -286,7 +322,7 @@ app.get('/', (req, res) => {
                 recognitionRef.current = recognition;
             }, [status, isAiSpeaking, processing, selectedLang]);
 
-            // 4. Watchdog: Restart Mic if it dies
+            // 4. Watchdog
             useEffect(() => {
                 if (status === 'ACTIVE' && !isAiSpeaking && !processing && !isListening) {
                     const timer = setTimeout(() => {
@@ -296,7 +332,7 @@ app.get('/', (req, res) => {
                 }
             }, [status, isAiSpeaking, processing, isListening]);
 
-            // 5. Speak Function
+            // 5. Speak
             const speak = (text, langCode) => {
                 try { recognitionRef.current.abort(); } catch(e) {}
                 setIsAiSpeaking(true);
@@ -305,13 +341,10 @@ app.get('/', (req, res) => {
                 const u = new SpeechSynthesisUtterance(text);
                 const bestVoice = getBestVoice(langCode);
                 if (bestVoice) u.voice = bestVoice;
-                
                 u.rate = 1.0; 
                 u.pitch = 1.0; 
-                
                 u.onend = () => setIsAiSpeaking(false);
                 u.onerror = () => setIsAiSpeaking(false);
-                
                 synth.speak(u);
             };
 
@@ -386,7 +419,6 @@ app.get('/', (req, res) => {
             return (
                 <div className="flex flex-col items-center w-full">
                     
-                    {/* NAVBAR */}
                     <nav className="w-full bg-white border-b border-slate-200 px-6 py-4 flex items-center justify-between shadow-sm sticky top-0 z-50">
                         <div className="flex items-center gap-6">
                             <img src="https://onramp.money/_app/immutable/assets/logo.D-_KihkR.svg" alt="Onramp" className="h-8" />
@@ -395,35 +427,17 @@ app.get('/', (req, res) => {
                                 <a href="#" className="hover:text-blue-600 transition">Business</a>
                             </div>
                         </div>
-                        <div className="text-sm font-bold text-slate-800 bg-slate-100 px-3 py-1.5 rounded-full">
-                            Video KYC
-                        </div>
+                        <div className="text-sm font-bold text-slate-800 bg-slate-100 px-3 py-1.5 rounded-full">Video KYC</div>
                     </nav>
 
-                    {/* MAIN CONTENT AREA */}
                     <div className="w-full max-w-5xl px-4 py-8 flex flex-col md:flex-row gap-8 items-start justify-center mt-6">
                         
-                        {/* LEFT SIDE: TEXT (Desktop Only) */}
                         <div className="hidden md:flex flex-col gap-4 flex-1 pt-8">
-                            <h1 className="text-4xl font-bold text-slate-900 leading-tight">
-                                Instant <span className="text-blue-600">Video KYC</span> Verification
-                            </h1>
-                            <p className="text-slate-500 text-lg">
-                                Secure your account in seconds using our AI-powered verification agent. Hands-free, fast, and secure.
-                            </p>
-                            <div className="flex gap-4 mt-4">
-                                <div className="flex items-center gap-2 text-slate-700 bg-white px-4 py-2 rounded-full border border-slate-200 shadow-sm">
-                                    <span className="text-green-500">●</span> 60+ countries
-                                </div>
-                                <div className="flex items-center gap-2 text-slate-700 bg-white px-4 py-2 rounded-full border border-slate-200 shadow-sm">
-                                    <span className="text-blue-500">●</span> 24/7 AI Agent
-                                </div>
-                            </div>
+                            <h1 className="text-4xl font-bold text-slate-900 leading-tight">Instant <span className="text-blue-600">Video KYC</span> Verification</h1>
+                            <p className="text-slate-500 text-lg">Secure your account in seconds using our AI-powered verification agent. Hands-free, fast, and secure.</p>
                         </div>
 
-                        {/* RIGHT SIDE: THE "WIDGET" CARD */}
                         <div className="w-full md:max-w-md bg-white rounded-3xl p-6 onramp-card relative">
-                            
                             <div className="flex mb-6 border-b border-slate-100 pb-2">
                                 <button className="flex-1 text-center pb-2 font-semibold text-blue-600 border-b-2 border-blue-600">Verification</button>
                                 <button className="flex-1 text-center pb-2 font-medium text-slate-400">Settings</button>
@@ -431,21 +445,15 @@ app.get('/', (req, res) => {
 
                             <div className="relative w-full aspect-[4/3] bg-slate-50 rounded-2xl overflow-hidden border border-slate-200 mb-6">
                                 <video ref={videoRef} autoPlay muted className="w-full h-full object-cover video-container" />
-                                
                                 <div className="absolute top-3 right-3 bg-red-50/90 text-red-600 px-3 py-1 text-xs font-bold rounded-full flex items-center gap-1.5 border border-red-100">
                                      <div className={"w-1.5 h-1.5 bg-red-500 rounded-full " + (status === 'ACTIVE' ? "animate-pulse" : "")}></div> LIVE
                                 </div>
-
-                                {/* CAPTIONS OVERLAY */}
                                 <div className="absolute bottom-0 w-full p-4 bg-gradient-to-t from-slate-900/80 to-transparent min-h-[80px] flex items-end justify-center">
                                     <div className="text-center font-medium leading-relaxed">
                                         {isAiSpeaking ? (
                                             <span className="text-white text-shadow-sm">"{logs.length > 0 && logs[logs.length-1].sender === 'AI' ? logs[logs.length-1].text : '...'}"</span>
                                         ) : processing ? (
-                                            <span className="text-blue-300 flex items-center gap-2 text-sm">
-                                                <svg className="animate-spin h-4 w-4" viewBox="0 0 24 24"><circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" fill="none"></circle><path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path></svg>
-                                                Verifying answer...
-                                            </span>
+                                            <span className="text-blue-300 flex items-center gap-2 text-sm">Verifying answer...</span>
                                         ) : isListening ? (
                                             <span className="text-green-300 font-bold animate-pulse text-sm">Listening...</span>
                                         ) : <span className="text-white/80 text-sm">Ready to start</span>}
@@ -453,31 +461,14 @@ app.get('/', (req, res) => {
                                 </div>
                             </div>
 
-                            {/* CONTROLS */}
                             {status === "IDLE" ? (
                                 <div className="space-y-4">
                                     <label className="text-xs font-bold text-slate-500 uppercase tracking-wider">Select Language</label>
                                     <div className="flex gap-3">
-                                        <button 
-                                            onClick={() => setSelectedLang('en-IN')}
-                                            className={"flex-1 py-3 rounded-xl border font-semibold text-sm transition " + (selectedLang === 'en-IN' ? "border-blue-600 bg-blue-50 text-blue-700" : "border-slate-200 text-slate-600 hover:border-slate-300")}
-                                        >
-                                            🇬🇧 English
-                                        </button>
-                                        <button 
-                                            onClick={() => setSelectedLang('hi-IN')}
-                                            className={"flex-1 py-3 rounded-xl border font-semibold text-sm transition " + (selectedLang === 'hi-IN' ? "border-blue-600 bg-blue-50 text-blue-700" : "border-slate-200 text-slate-600 hover:border-slate-300")}
-                                        >
-                                            🇮🇳 Hindi
-                                        </button>
+                                        <button onClick={() => setSelectedLang('en-IN')} className={"flex-1 py-3 rounded-xl border font-semibold text-sm transition " + (selectedLang === 'en-IN' ? "border-blue-600 bg-blue-50 text-blue-700" : "border-slate-200 text-slate-600 hover:border-slate-300")}>🇬🇧 English</button>
+                                        <button onClick={() => setSelectedLang('hi-IN')} className={"flex-1 py-3 rounded-xl border font-semibold text-sm transition " + (selectedLang === 'hi-IN' ? "border-blue-600 bg-blue-50 text-blue-700" : "border-slate-200 text-slate-600 hover:border-slate-300")}>🇮🇳 Hindi</button>
                                     </div>
-
-                                    <button 
-                                        onClick={startSession} 
-                                        className="w-full bg-blue-600 hover:bg-blue-700 text-white font-bold py-4 rounded-xl text-lg transition shadow-lg shadow-blue-200 mt-2"
-                                    >
-                                        Start Verification
-                                    </button>
+                                    <button onClick={startSession} className="w-full bg-blue-600 hover:bg-blue-700 text-white font-bold py-4 rounded-xl text-lg transition shadow-lg shadow-blue-200 mt-2">Start Verification</button>
                                 </div>
                             ) : (
                                 <div className="space-y-3">
@@ -488,14 +479,7 @@ app.get('/', (req, res) => {
                                         <div className="text-xs font-bold uppercase tracking-wider mb-1 opacity-70">Status</div>
                                         <div className="text-xl font-bold">{status}</div>
                                     </div>
-                                    
-                                    <button 
-                                        onClick={endSession} 
-                                        className="w-full bg-white hover:bg-red-50 text-red-500 border border-slate-200 hover:border-red-200 font-bold py-3 rounded-xl transition flex items-center justify-center gap-2 group"
-                                    >
-                                        <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor" className="w-5 h-5 group-hover:animate-pulse">
-                                          <path strokeLinecap="round" strokeLinejoin="round" d="M15.75 9V5.25A2.25 2.25 0 0013.5 3h-3a2.25 2.25 0 00-2.25 2.25V9m7.5 0A2.25 2.25 0 0118 11.25v2.25c0 1.242-1.008 2.25-2.25 2.25h-7.5A2.25 2.25 0 016 13.5v-2.25A2.25 2.25 0 018.25 9m7.5 0v-.375c3 .62 5.25 3.28 5.25 6.375V21h-1.5v-6a3.75 3.75 0 00-3.75-3.75H9A3.75 3.75 0 005.25 15v6H3.75v-6c0-3.095 2.25-5.755 5.25-6.375V9" />
-                                        </svg>
+                                    <button onClick={endSession} className="w-full bg-white hover:bg-red-50 text-red-500 border border-slate-200 hover:border-red-200 font-bold py-3 rounded-xl transition flex items-center justify-center gap-2 group">
                                         End Session
                                     </button>
                                 </div>
@@ -522,4 +506,3 @@ app.get('/', (req, res) => {
 app.listen(port, () => {
     console.log(`Server running at http://localhost:${port}`);
 });
-
