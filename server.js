@@ -84,7 +84,7 @@ async function getGeminiResponse(history, userText) {
         return { next_question: "System Error: API Key missing.", kyc_status: "CONTINUE", risk_flag: false };
     }
 
-    const url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-pro:generateContent?key=" + GEMINI_API_KEY;
+    const url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=" + GEMINI_API_KEY;
     
     // Construct Prompt
     const contents = history.map(h => ({
@@ -454,4 +454,5 @@ app.get('/', (req, res) => {
 app.listen(port, () => {
     console.log("Server running at http://localhost:" + port);
 });
+
 
