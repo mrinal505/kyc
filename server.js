@@ -1,8 +1,8 @@
 // =============================================================
-//  ONRAMP.MONEY AI KYC AGENT (PRO VERSION - FIXED)
-//  - MongoDB Database Integration
-//  - Video Recording & Upload
-//  - Professional Split-Screen UI
+//  ONRAMP.MONEY AI KYC AGENT (ULTIMATE PRO VERSION)
+//  - AI Leads the Conversation
+//  - Robust Error Handling (No Crashing)
+//  - MongoDB & Video Recording
 // =============================================================
 
 const express = require('express');
@@ -16,9 +16,29 @@ const app = express();
 const port = process.env.PORT || 3000;
 
 // --- CONFIGURATION ---
-// ⚠️ Ensure these are set in Render Environment Variables
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY; 
 const MONGO_URI = process.env.MONGO_URI; 
+
+// --- BRAIN: THE INVESTIGATOR PERSONA ---
+const SYSTEM_INSTRUCTION = `
+ROLE: You are a Senior Financial Crime Investigator.
+GOAL: Detect fraud (Pig Butchering, Money Mules, Coercion).
+TONE: Professional, Firm, but Polite.
+LANGUAGE: Adapt to the user's language (English or Hindi).
+
+RULES:
+1. YOU ask the questions. Do not let the user lead.
+2. SHORT questions (1-2 sentences max).
+3. PROBE vague answers. If they say "investment", ask "Who recommended it?".
+4. DETECT COERCION: If they look away or pause, ask "Is someone telling you what to say?".
+
+OUTPUT FORMAT (JSON ONLY):
+{
+  "next_question": "Your next question here",
+  "kyc_status": "CONTINUE" (or "APPROVED" / "REJECTED"),
+  "risk_flag": boolean
+}
+`;
 
 // --- MIDDLEWARE ---
 app.use(cors());
@@ -36,7 +56,6 @@ const storage = multer.diskStorage({
 const upload = multer({ storage: storage });
 
 // --- DATABASE CONNECTION ---
-// Graceful fallback if Mongo is missing for testing
 if (MONGO_URI) {
     mongoose.connect(MONGO_URI)
         .then(() => console.log("✅ Connected to MongoDB"))
@@ -58,17 +77,26 @@ const SessionSchema = new mongoose.Schema({
 
 const Session = mongoose.model('Session', SessionSchema);
 
-// --- AI LOGIC ---
+// --- AI LOGIC (ROBUST VERSION) ---
 async function getGeminiResponse(history, userText) {
-    if (!GEMINI_API_KEY) return { next_question: "API Key Missing", kyc_status: "CONTINUE" };
+    if (!GEMINI_API_KEY) {
+        console.error("❌ API Key Missing");
+        return { next_question: "System Error: API Key missing.", kyc_status: "CONTINUE", risk_flag: false };
+    }
 
     const url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=" + GEMINI_API_KEY;
     
+    // Construct Prompt
     const contents = history.map(h => ({
         role: h.role === 'model' ? 'model' : 'user',
         parts: h.parts
     }));
-    contents.push({ role: "user", parts: [{ text: userText + " (Reply valid JSON: {next_question, kyc_status, risk_flag})" }] });
+    
+    // Add User Input with strict JSON instruction
+    contents.push({ 
+        role: "user", 
+        parts: [{ text: userText + " (Reply valid JSON: {next_question, kyc_status, risk_flag})" }] 
+    });
 
     try {
         const response = await fetch(url, {
@@ -76,13 +104,26 @@ async function getGeminiResponse(history, userText) {
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ contents })
         });
+
         const data = await response.json();
+
+        // Safety Checks
+        if (data.error) {
+            console.error("❌ GOOGLE API ERROR:", data.error.message);
+            return { next_question: "Connection issue. Please repeat.", kyc_status: "CONTINUE", risk_flag: false };
+        }
+        
+        if (!data.candidates || !data.candidates[0]) {
+            return { next_question: "I didn't hear you clearly.", kyc_status: "CONTINUE", risk_flag: false };
+        }
+
         let raw = data.candidates[0].content.parts[0].text;
         raw = raw.replace(/```json/g, '').replace(/```/g, '').trim();
         return JSON.parse(raw);
+
     } catch (e) {
-        console.error("AI Error:", e);
-        return { next_question: "I didn't catch that.", kyc_status: "CONTINUE", risk_flag: false };
+        console.error("❌ PARSE/NET ERROR:", e.message);
+        return { next_question: "Technical glitch. Let's continue.", kyc_status: "CONTINUE", risk_flag: false };
     }
 }
 
@@ -90,11 +131,17 @@ const activeSessions = {};
 
 // --- ROUTES ---
 
+// 1. START: Initializes the "Investigator Brain"
 app.post('/api/start', async (req, res) => {
     const { language } = req.body;
     const sessionId = Date.now().toString();
-    const initialQ = language === 'hi-IN' ? "नमस्ते, अपना नाम बताइये?" : "Hello, please state your name.";
     
+    // The FIRST question the AI asks (It takes charge immediately)
+    const initialQ = language === 'hi-IN' 
+        ? "नमस्ते. वेरिफिकेशन शुरू करने के लिए, कृपया अपना पूरा नाम बताएं?" 
+        : "Hello. To start verification, please state your full name?";
+    
+    // Setup DB
     if (MONGO_URI) {
         try {
             const newSession = new Session({
@@ -108,22 +155,30 @@ app.post('/api/start', async (req, res) => {
         } catch(e) { console.error("DB Save Error", e); }
     }
 
+    // Setup AI Memory with the System Instruction
     activeSessions[sessionId] = { 
-        history: [{ role: "model", parts: [{ text: JSON.stringify({ next_question: initialQ }) }] }] 
+        history: [
+            { role: "user", parts: [{ text: SYSTEM_INSTRUCTION }] }, // Inject Persona
+            { role: "model", parts: [{ text: JSON.stringify({ next_question: initialQ }) }] } // Inject First Q
+        ] 
     };
 
     res.json({ sessionId, next_question: initialQ, language_code: language });
 });
 
+// 2. PROCESS: Handles the back-and-forth
 app.post('/api/process', async (req, res) => {
     const { sessionId, userText } = req.body;
     if (!activeSessions[sessionId]) return res.status(404).json({ error: "Session expired" });
 
+    // AI THINKS AND REPLIES
     const aiResp = await getGeminiResponse(activeSessions[sessionId].history, userText);
     
+    // UPDATE MEMORY
     activeSessions[sessionId].history.push({ role: "user", parts: [{ text: userText }] });
     activeSessions[sessionId].history.push({ role: "model", parts: [{ text: JSON.stringify(aiResp) }] });
 
+    // UPDATE DB
     if (MONGO_URI) {
         try {
             await Session.findOneAndUpdate({ sessionId }, {
@@ -141,6 +196,7 @@ app.post('/api/process', async (req, res) => {
     res.json(aiResp);
 });
 
+// 3. UPLOAD: Saves the video evidence
 app.post('/api/upload-video', upload.single('video'), async (req, res) => {
     const { sessionId } = req.body;
     if (req.file) {
