@@ -1,5 +1,5 @@
 // =============================================================
-//  ONRAMP.MONEY AI KYC AGENT (PRO VERSION)
+//  ONRAMP.MONEY AI KYC AGENT (PRO VERSION - FIXED)
 //  - MongoDB Database Integration
 //  - Video Recording & Upload
 //  - Professional Split-Screen UI
@@ -16,14 +16,14 @@ const app = express();
 const port = process.env.PORT || 3000;
 
 // --- CONFIGURATION ---
+// ⚠️ Ensure these are set in Render Environment Variables
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY; 
-// ⚠️ Get this from MongoDB Atlas (cloud.mongodb.com)
-const MONGO_URI = process.env.MONGO_URI || "mongodb+srv://YOUR_USER:YOUR_PASS@cluster0.example.mongodb.net/kyc-db"; 
+const MONGO_URI = process.env.MONGO_URI; 
 
 // --- MIDDLEWARE ---
 app.use(cors());
-app.use(express.json({ limit: '50mb' })); // Increased limit for video chunks if needed
-app.use('/uploads', express.static('uploads')); // Serve recorded videos
+app.use(express.json({ limit: '50mb' })); 
+app.use('/uploads', express.static('uploads'));
 
 // Ensure uploads directory exists
 if (!fs.existsSync('uploads')) fs.mkdirSync('uploads');
@@ -31,44 +31,38 @@ if (!fs.existsSync('uploads')) fs.mkdirSync('uploads');
 // Configure Multer for Video Storage
 const storage = multer.diskStorage({
     destination: (req, file, cb) => cb(null, 'uploads/'),
-    filename: (req, file, cb) => cb(null, `kyc-${Date.now()}.webm`)
+    filename: (req, file, cb) => cb(null, 'kyc-' + Date.now() + '.webm')
 });
 const upload = multer({ storage: storage });
 
 // --- DATABASE CONNECTION ---
-mongoose.connect(MONGO_URI)
-    .then(() => console.log("✅ Connected to MongoDB"))
-    .catch(err => console.error("❌ MongoDB Error:", err));
+// Graceful fallback if Mongo is missing for testing
+if (MONGO_URI) {
+    mongoose.connect(MONGO_URI)
+        .then(() => console.log("✅ Connected to MongoDB"))
+        .catch(err => console.error("❌ MongoDB Error:", err));
+} else {
+    console.warn("⚠️ MONGO_URI missing. Database features will be skipped.");
+}
 
 // --- DATABASE SCHEMA ---
 const SessionSchema = new mongoose.Schema({
     sessionId: String,
     timestamp: { type: Date, default: Date.now },
-    status: String, // APPROVED, REJECTED, ABORTED
+    status: String,
     riskFlag: Boolean,
     language: String,
-    transcript: [
-        {
-            sender: String, // 'AI' or 'USER'
-            text: String,
-            time: String
-        }
-    ],
-    videoPath: String // Path to the saved video file
+    transcript: [{ sender: String, text: String, time: String }],
+    videoPath: String
 });
 
 const Session = mongoose.model('Session', SessionSchema);
 
-// --- AI LOGIC (Simulated for Brevity - Keeping your Logic) ---
-// Note: In production, keep your robust discoverModel() and callGemini() functions here.
-// I am simplifying the AI call slightly to focus on the DB/Frontend integration.
-
+// --- AI LOGIC ---
 async function getGeminiResponse(history, userText) {
     if (!GEMINI_API_KEY) return { next_question: "API Key Missing", kyc_status: "CONTINUE" };
-    
-    // ... (Paste your robust callGemini logic here if needed, keeping it simple for this file) ...
-    // Using a simple fetch for the example:
-    const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${GEMINI_API_KEY}`;
+
+    const url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=" + GEMINI_API_KEY;
     
     const contents = history.map(h => ({
         role: h.role === 'model' ? 'model' : 'user',
@@ -92,28 +86,28 @@ async function getGeminiResponse(history, userText) {
     }
 }
 
-// In-Memory specific session tracker (Active processing only)
 const activeSessions = {};
 
 // --- ROUTES ---
 
-// 1. Start Session
 app.post('/api/start', async (req, res) => {
     const { language } = req.body;
     const sessionId = Date.now().toString();
     const initialQ = language === 'hi-IN' ? "नमस्ते, अपना नाम बताइये?" : "Hello, please state your name.";
     
-    // Create DB Entry
-    const newSession = new Session({
-        sessionId,
-        status: "ACTIVE",
-        language,
-        transcript: [{ sender: 'AI', text: initialQ, time: new Date().toISOString() }],
-        riskFlag: false
-    });
-    await newSession.save();
+    if (MONGO_URI) {
+        try {
+            const newSession = new Session({
+                sessionId,
+                status: "ACTIVE",
+                language,
+                transcript: [{ sender: 'AI', text: initialQ, time: new Date().toISOString() }],
+                riskFlag: false
+            });
+            await newSession.save();
+        } catch(e) { console.error("DB Save Error", e); }
+    }
 
-    // Cache for AI context
     activeSessions[sessionId] = { 
         history: [{ role: "model", parts: [{ text: JSON.stringify({ next_question: initialQ }) }] }] 
     };
@@ -121,51 +115,46 @@ app.post('/api/start', async (req, res) => {
     res.json({ sessionId, next_question: initialQ, language_code: language });
 });
 
-// 2. Process Answer
 app.post('/api/process', async (req, res) => {
     const { sessionId, userText } = req.body;
     if (!activeSessions[sessionId]) return res.status(404).json({ error: "Session expired" });
 
-    // AI Processing
     const aiResp = await getGeminiResponse(activeSessions[sessionId].history, userText);
     
-    // Update In-Memory History
     activeSessions[sessionId].history.push({ role: "user", parts: [{ text: userText }] });
     activeSessions[sessionId].history.push({ role: "model", parts: [{ text: JSON.stringify(aiResp) }] });
 
-    // Update Database
-    await Session.findOneAndUpdate({ sessionId }, {
-        $push: { 
-            transcript: [
-                { sender: 'USER', text: userText, time: new Date().toISOString() },
-                { sender: 'AI', text: aiResp.next_question, time: new Date().toISOString() }
-            ]
-        },
-        $set: { 
-            status: aiResp.kyc_status,
-            riskFlag: aiResp.risk_flag 
-        }
-    });
+    if (MONGO_URI) {
+        try {
+            await Session.findOneAndUpdate({ sessionId }, {
+                $push: { 
+                    transcript: [
+                        { sender: 'USER', text: userText, time: new Date().toISOString() },
+                        { sender: 'AI', text: aiResp.next_question, time: new Date().toISOString() }
+                    ]
+                },
+                $set: { status: aiResp.kyc_status, riskFlag: aiResp.risk_flag }
+            });
+        } catch(e) { console.error("DB Update Error", e); }
+    }
 
     res.json(aiResp);
 });
 
-// 3. Upload Video (Called when session ends)
 app.post('/api/upload-video', upload.single('video'), async (req, res) => {
     const { sessionId } = req.body;
     if (req.file) {
-        console.log(`🎥 Video saved: ${req.file.path} for Session ${sessionId}`);
-        
-        await Session.findOneAndUpdate({ sessionId }, {
-            videoPath: req.file.path
-        });
+        console.log("🎥 Video saved:", req.file.path);
+        if (MONGO_URI) {
+            await Session.findOneAndUpdate({ sessionId }, { videoPath: req.file.path });
+        }
         res.json({ success: true, path: req.file.path });
     } else {
         res.status(400).json({ error: "No video file" });
     }
 });
 
-// --- FRONTEND ---
+// --- FRONTEND UI ---
 app.get('/', (req, res) => {
     res.send(`
 <!DOCTYPE html>
@@ -183,7 +172,6 @@ app.get('/', (req, res) => {
         body { font-family: 'Plus Jakarta Sans', sans-serif; background-color: #F1F5F9; }
         .chat-bubble { max-width: 85%; animation: fadeIn 0.3s ease-up; }
         @keyframes fadeIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
-        /* Custom Scrollbar */
         .scroller::-webkit-scrollbar { width: 6px; }
         .scroller::-webkit-scrollbar-track { background: transparent; }
         .scroller::-webkit-scrollbar-thumb { background-color: #CBD5E1; border-radius: 20px; }
@@ -198,7 +186,7 @@ app.get('/', (req, res) => {
 
         function App() {
             const [sessionId, setSessionId] = useState(null);
-            const [status, setStatus] = useState("IDLE"); // IDLE, ACTIVE, APPROVED, REJECTED
+            const [status, setStatus] = useState("IDLE");
             const [transcript, setTranscript] = useState([]);
             const [processing, setProcessing] = useState(false);
             const [lang, setLang] = useState('en-IN');
@@ -208,7 +196,6 @@ app.get('/', (req, res) => {
             const chunksRef = useRef([]);
             const recognitionRef = useRef(null);
 
-            // 1. Initialize Camera
             useEffect(() => {
                 navigator.mediaDevices.getUserMedia({ video: true, audio: true })
                     .then(stream => {
@@ -217,7 +204,6 @@ app.get('/', (req, res) => {
                     .catch(e => console.error("Camera denied:", e));
             }, []);
 
-            // 2. Start Recording Logic
             const startRecording = () => {
                 const stream = videoRef.current.srcObject;
                 if (!stream) return;
@@ -238,8 +224,6 @@ app.get('/', (req, res) => {
                 
                 mediaRecorderRef.current.onstop = () => {
                     const blob = new Blob(chunksRef.current, { type: 'video/webm' });
-                    
-                    // Upload to Backend
                     const formData = new FormData();
                     formData.append("video", blob);
                     formData.append("sessionId", finalSessionId);
@@ -252,7 +236,6 @@ app.get('/', (req, res) => {
                 mediaRecorderRef.current.stop();
             };
 
-            // 3. Speech Recognition Setup
             useEffect(() => {
                 const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
                 if (!SpeechRecognition) return;
@@ -267,22 +250,20 @@ app.get('/', (req, res) => {
                 };
                 
                 recognitionRef.current = recognition;
-            }, [lang, sessionId]); // Re-init if lang changes
+            }, [lang, sessionId]);
 
             const speak = (text) => {
                 window.speechSynthesis.cancel();
                 const u = new SpeechSynthesisUtterance(text);
                 u.lang = lang;
                 u.onend = () => {
-                    // Start listening ONLY after AI finishes speaking
-                    if (status === 'ACTIVE' || status === 'IDLE') { // Simple check
+                    if (status === 'ACTIVE' || status === 'IDLE') {
                         try { recognitionRef.current.start(); } catch(e){}
                     }
                 };
                 window.speechSynthesis.speak(u);
             };
 
-            // 4. Core Interaction
             const startSession = async () => {
                 setStatus("ACTIVE");
                 startRecording();
@@ -316,7 +297,7 @@ app.get('/', (req, res) => {
                 if (data.kyc_status !== 'CONTINUE') {
                     setStatus(data.kyc_status);
                     stopAndUploadRecording(sessionId);
-                    speak(data.next_question); // Final words
+                    speak(data.next_question);
                 } else {
                     speak(data.next_question);
                 }
@@ -355,12 +336,8 @@ app.get('/', (req, res) => {
                         {/* Chat Area */}
                         <div className="flex-1 overflow-y-auto p-6 space-y-4 bg-slate-50 scroller">
                             {transcript.map((t, i) => (
-                                <div key={i} className={`flex flex-col ${t.sender === 'USER' ? 'items-end' : 'items-start'}`}>
-                                    <div className={`chat-bubble px-5 py-3 rounded-2xl text-sm leading-relaxed shadow-sm ${
-                                        t.sender === 'USER' 
-                                        ? 'bg-blue-600 text-white rounded-br-sm' 
-                                        : 'bg-white border border-slate-200 text-slate-700 rounded-bl-sm'
-                                    }`}>
+                                <div key={i} className={"flex flex-col " + (t.sender === 'USER' ? 'items-end' : 'items-start')}>
+                                    <div className={"chat-bubble px-5 py-3 rounded-2xl text-sm leading-relaxed shadow-sm " + (t.sender === 'USER' ? 'bg-blue-600 text-white rounded-br-sm' : 'bg-white border border-slate-200 text-slate-700 rounded-bl-sm')}>
                                         {t.text}
                                     </div>
                                     <span className="text-[10px] text-slate-400 mt-1 px-1">{t.sender} • {t.time}</span>
@@ -383,8 +360,8 @@ app.get('/', (req, res) => {
                                 <div className="flex flex-col gap-3">
                                     <label className="text-sm font-medium text-slate-600">Select Language to Begin</label>
                                     <div className="flex gap-3">
-                                        <button onClick={() => setLang('en-IN')} className={`flex-1 py-3 rounded-xl border text-sm font-semibold transition ${lang === 'en-IN' ? 'border-blue-600 bg-blue-50 text-blue-700' : 'border-slate-200 hover:border-blue-300'}`}>🇬🇧 English</button>
-                                        <button onClick={() => setLang('hi-IN')} className={`flex-1 py-3 rounded-xl border text-sm font-semibold transition ${lang === 'hi-IN' ? 'border-blue-600 bg-blue-50 text-blue-700' : 'border-slate-200 hover:border-blue-300'}`}>🇮🇳 Hindi</button>
+                                        <button onClick={() => setLang('en-IN')} className={"flex-1 py-3 rounded-xl border text-sm font-semibold transition " + (lang === 'en-IN' ? 'border-blue-600 bg-blue-50 text-blue-700' : 'border-slate-200 hover:border-blue-300')}>🇬🇧 English</button>
+                                        <button onClick={() => setLang('hi-IN')} className={"flex-1 py-3 rounded-xl border text-sm font-semibold transition " + (lang === 'hi-IN' ? 'border-blue-600 bg-blue-50 text-blue-700' : 'border-slate-200 hover:border-blue-300')}>🇮🇳 Hindi</button>
                                     </div>
                                     <button onClick={startSession} className="w-full bg-slate-900 hover:bg-slate-800 text-white font-bold py-4 rounded-xl shadow-lg shadow-slate-200/50 transition mt-2 flex items-center justify-center gap-2">
                                         <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M15 10l4.553-2.276A1 1 0 0121 8.618v6.764a1 1 0 01-1.447.894L15 14M5 18h8a2 2 0 002-2V8a2 2 0 00-2-2H5a2 2 0 00-2 2v8a2 2 0 002 2z"></path></svg>
@@ -397,7 +374,7 @@ app.get('/', (req, res) => {
                                     <span className="text-blue-700 font-medium text-sm">Session in progress. Please speak clearly.</span>
                                 </div>
                             ) : (
-                                <div className={`p-4 rounded-xl border text-center ${status === 'APPROVED' ? 'bg-green-50 border-green-200 text-green-700' : 'bg-red-50 border-red-200 text-red-700'}`}>
+                                <div className={"p-4 rounded-xl border text-center " + (status === 'APPROVED' ? 'bg-green-50 border-green-200 text-green-700' : 'bg-red-50 border-red-200 text-red-700')}>
                                     <div className="text-xs font-bold uppercase mb-1">Status</div>
                                     <div className="text-2xl font-bold">{status}</div>
                                     <p className="text-xs mt-2 opacity-80">Video & Transcript uploaded to database.</p>
@@ -419,5 +396,5 @@ app.get('/', (req, res) => {
 });
 
 app.listen(port, () => {
-    console.log(`Server running at http://localhost:${port}`);
+    console.log("Server running at http://localhost:" + port);
 });
