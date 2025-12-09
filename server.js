@@ -1,9 +1,8 @@
 // =============================================================
-//  ONRAMP.MONEY AI KYC AGENT (ULTIMATE FIXED VERSION)
-//  - Model: gemini-2.5-flash (User Preserved)
-//  - Fixes DB "Invisible Data" (Using $each)
-//  - Limits Questions (Max 3)
-//  - Robust JSON Parsing
+//  ONRAMP.MONEY AI KYC AGENT (ULTIMATE ADMIN VERSION)
+//  - Admin Dashboard Added
+//  - Video Playback UI
+//  - Model: gemini-2.5-flash
 // =============================================================
 
 const express = require('express');
@@ -20,7 +19,7 @@ const port = process.env.PORT || 3000;
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY; 
 const MONGO_URI = process.env.MONGO_URI; 
 
-// --- BRAIN: THE INVESTIGATOR PERSONA (SHORT & FAST) ---
+// --- BRAIN: THE INVESTIGATOR PERSONA ---
 const SYSTEM_INSTRUCTION = `
 ROLE: Senior Financial Crime Investigator.
 GOAL: Detect fraud (Pig Butchering, Money Mules) FAST.
@@ -50,7 +49,7 @@ OUTPUT FORMAT (JSON ONLY):
 // --- MIDDLEWARE ---
 app.use(cors());
 app.use(express.json({ limit: '50mb' })); 
-app.use('/uploads', express.static('uploads'));
+app.use('/uploads', express.static('uploads')); // Serves video files
 
 if (!fs.existsSync('uploads')) fs.mkdirSync('uploads');
 
@@ -100,7 +99,6 @@ function cleanAndParseJSON(text) {
 async function getGeminiResponse(history, userText) {
     if (!GEMINI_API_KEY) return { next_question: "System Error: API Key missing.", kyc_status: "CONTINUE" };
 
-    // ✅ MODEL SET TO gemini-2.5-flash AS REQUESTED
     const url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-lite:generateContent?key=" + GEMINI_API_KEY;
     
     const contents = history.map(h => ({
@@ -151,6 +149,7 @@ const activeSessions = {};
 
 // --- ROUTES ---
 
+// 1. Start Session
 app.post('/api/start', async (req, res) => {
     const { language } = req.body;
     const sessionId = Date.now().toString();
@@ -168,7 +167,6 @@ app.post('/api/start', async (req, res) => {
                 riskFlag: false
             });
             await newSession.save();
-            console.log(`📝 Session ${sessionId} Created in DB`);
         } catch(e) { console.error("DB Save Error", e); }
     }
 
@@ -182,6 +180,7 @@ app.post('/api/start', async (req, res) => {
     res.json({ sessionId, next_question: initialQ, language_code: language });
 });
 
+// 2. Process Answer
 app.post('/api/process', async (req, res) => {
     const { sessionId, userText } = req.body;
     if (!activeSessions[sessionId]) return res.status(404).json({ error: "Session expired" });
@@ -193,7 +192,6 @@ app.post('/api/process', async (req, res) => {
 
     if (MONGO_URI) {
         try {
-            // ✅ FIX: Using $each to push multiple items correctly so you can see them in Atlas
             await Session.findOneAndUpdate(
                 { sessionId }, 
                 {
@@ -209,13 +207,13 @@ app.post('/api/process', async (req, res) => {
                 },
                 { new: true } 
             );
-            console.log(`📝 DB Updated for ${sessionId}`);
         } catch(e) { console.error("DB Update Error", e); }
     }
 
     res.json(aiResp);
 });
 
+// 3. Upload Video
 app.post('/api/upload-video', upload.single('video'), async (req, res) => {
     const { sessionId } = req.body;
     if (req.file) {
@@ -226,6 +224,18 @@ app.post('/api/upload-video', upload.single('video'), async (req, res) => {
         res.json({ success: true, path: req.file.path });
     } else {
         res.status(400).json({ error: "No video file" });
+    }
+});
+
+// 4. NEW: Admin API to Get All Sessions
+app.get('/api/admin/sessions', async (req, res) => {
+    if (!MONGO_URI) return res.json([]);
+    try {
+        // Fetch last 50 sessions, sorted by newest first
+        const sessions = await Session.find().sort({ timestamp: -1 }).limit(50);
+        res.json(sessions);
+    } catch (e) {
+        res.status(500).json({ error: e.message });
     }
 });
 
@@ -260,70 +270,67 @@ app.get('/', (req, res) => {
         const { useState, useEffect, useRef } = React;
 
         function App() {
+            const [view, setView] = useState('KYC'); // 'KYC' or 'ADMIN'
             const [sessionId, setSessionId] = useState(null);
             const [status, setStatus] = useState("IDLE");
             const [transcript, setTranscript] = useState([]);
             const [processing, setProcessing] = useState(false);
             const [lang, setLang] = useState('en-IN');
             
+            // Admin State
+            const [sessions, setSessions] = useState([]);
+            
             const videoRef = useRef(null);
             const mediaRecorderRef = useRef(null);
             const chunksRef = useRef([]);
             const recognitionRef = useRef(null);
 
+            // --- CAMERA SETUP ---
             useEffect(() => {
-                navigator.mediaDevices.getUserMedia({ video: true, audio: true })
-                    .then(stream => {
-                        if (videoRef.current) videoRef.current.srcObject = stream;
-                    })
-                    .catch(e => console.error("Camera denied:", e));
-            }, []);
+                if (view === 'KYC') {
+                    navigator.mediaDevices.getUserMedia({ video: true, audio: true })
+                        .then(stream => {
+                            if (videoRef.current) videoRef.current.srcObject = stream;
+                        })
+                        .catch(e => console.error("Camera denied:", e));
+                }
+            }, [view]);
 
+            // --- RECORDING LOGIC ---
             const startRecording = () => {
                 const stream = videoRef.current.srcObject;
                 if (!stream) return;
-                
                 const recorder = new MediaRecorder(stream, { mimeType: 'video/webm' });
                 chunksRef.current = [];
-                
-                recorder.ondataavailable = (e) => {
-                    if (e.data.size > 0) chunksRef.current.push(e.data);
-                };
-                
+                recorder.ondataavailable = (e) => { if (e.data.size > 0) chunksRef.current.push(e.data); };
                 recorder.start();
                 mediaRecorderRef.current = recorder;
             };
 
             const stopAndUploadRecording = (finalSessionId) => {
                 if (!mediaRecorderRef.current) return;
-                
                 mediaRecorderRef.current.onstop = () => {
                     const blob = new Blob(chunksRef.current, { type: 'video/webm' });
                     const formData = new FormData();
                     formData.append("video", blob);
                     formData.append("sessionId", finalSessionId);
-                    
                     fetch('/api/upload-video', { method: 'POST', body: formData })
-                        .then(res => console.log("Video Uploaded Successfully"))
-                        .catch(err => console.error("Upload failed", err));
+                        .then(res => console.log("Video Uploaded Successfully"));
                 };
-                
                 mediaRecorderRef.current.stop();
             };
 
+            // --- SPEECH & AI ---
             useEffect(() => {
                 const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
                 if (!SpeechRecognition) return;
-
                 const recognition = new SpeechRecognition();
                 recognition.lang = lang;
                 recognition.continuous = false;
-                
                 recognition.onresult = (e) => {
                     const text = e.results[0][0].transcript;
                     handleUserAnswer(text);
                 };
-                
                 recognitionRef.current = recognition;
             }, [lang, sessionId]);
 
@@ -342,14 +349,12 @@ app.get('/', (req, res) => {
             const startSession = async () => {
                 setStatus("ACTIVE");
                 startRecording();
-                
                 const res = await fetch('/api/start', {
                     method: 'POST',
                     headers: {'Content-Type': 'application/json'},
                     body: JSON.stringify({ language: lang })
                 });
                 const data = await res.json();
-                
                 setSessionId(data.sessionId);
                 addTranscript('AI', data.next_question);
                 speak(data.next_question);
@@ -358,7 +363,6 @@ app.get('/', (req, res) => {
             const handleUserAnswer = async (text) => {
                 addTranscript('USER', text);
                 setProcessing(true);
-                
                 const res = await fetch('/api/process', {
                     method: 'POST',
                     headers: {'Content-Type': 'application/json'},
@@ -366,9 +370,7 @@ app.get('/', (req, res) => {
                 });
                 const data = await res.json();
                 setProcessing(false);
-
                 addTranscript('AI', data.next_question);
-                
                 if (data.kyc_status !== 'CONTINUE') {
                     setStatus(data.kyc_status);
                     stopAndUploadRecording(sessionId);
@@ -382,10 +384,83 @@ app.get('/', (req, res) => {
                 setTranscript(prev => [...prev, { sender, text, time: new Date().toLocaleTimeString() }]);
             };
 
+            // --- ADMIN LOGIC ---
+            const loadAdminData = async () => {
+                const res = await fetch('/api/admin/sessions');
+                const data = await res.json();
+                setSessions(data);
+            };
+
+            useEffect(() => {
+                if (view === 'ADMIN') loadAdminData();
+            }, [view]);
+
+            // --- RENDER ---
+            if (view === 'ADMIN') {
+                return (
+                    <div className="min-h-screen bg-slate-50 p-8">
+                        <div className="max-w-6xl mx-auto">
+                            <div className="flex justify-between items-center mb-8">
+                                <h1 className="text-3xl font-bold text-slate-800">Admin <span className="text-blue-600">Dashboard</span></h1>
+                                <button onClick={() => setView('KYC')} className="bg-white border border-slate-300 text-slate-700 px-4 py-2 rounded-lg hover:bg-slate-50 font-medium">
+                                    ← Back to KYC Agent
+                                </button>
+                            </div>
+
+                            <div className="bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden">
+                                <table className="w-full text-left">
+                                    <thead className="bg-slate-50 border-b border-slate-200">
+                                        <tr>
+                                            <th className="p-4 font-semibold text-slate-600">Session ID</th>
+                                            <th className="p-4 font-semibold text-slate-600">Time</th>
+                                            <th className="p-4 font-semibold text-slate-600">Language</th>
+                                            <th className="p-4 font-semibold text-slate-600">Status</th>
+                                            <th className="p-4 font-semibold text-slate-600">Evidence</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody className="divide-y divide-slate-100">
+                                        {sessions.map(s => (
+                                            <tr key={s._id} className="hover:bg-slate-50/50">
+                                                <td className="p-4 font-mono text-xs text-slate-500">{s.sessionId}</td>
+                                                <td className="p-4 text-sm text-slate-700">{new Date(s.timestamp).toLocaleString()}</td>
+                                                <td className="p-4 text-sm text-slate-700">{s.language}</td>
+                                                <td className="p-4">
+                                                    <span className={"px-2 py-1 rounded-full text-xs font-bold " + 
+                                                        (s.status === 'APPROVED' ? "bg-green-100 text-green-700" : 
+                                                         s.status === 'REJECTED' ? "bg-red-100 text-red-700" : "bg-slate-100 text-slate-600")}>
+                                                        {s.status}
+                                                    </span>
+                                                </td>
+                                                <td className="p-4">
+                                                    {s.videoPath ? (
+                                                        <a href={"/" + s.videoPath} target="_blank" className="text-blue-600 hover:underline text-sm font-medium flex items-center gap-1">
+                                                            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M14.752 11.168l-3.197-2.132A1 1 0 0010 9.87v4.263a1 1 0 001.555.832l3.197-2.132a1 1 0 000-1.664z"></path><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M21 12a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg>
+                                                            Watch Video
+                                                        </a>
+                                                    ) : <span className="text-slate-400 text-xs">No Video</span>}
+                                                </td>
+                                            </tr>
+                                        ))}
+                                    </tbody>
+                                </table>
+                                {sessions.length === 0 && <div className="p-8 text-center text-slate-500">No sessions found in database.</div>}
+                            </div>
+                        </div>
+                    </div>
+                );
+            }
+
             return (
                 <div className="flex flex-col md:flex-row h-full">
                     {/* LEFT PANEL: VIDEO */}
                     <div className="w-full md:w-1/2 bg-slate-900 relative flex flex-col items-center justify-center p-4">
+                         {/* ADMIN BUTTON */}
+                        <div className="absolute top-6 right-6 z-20">
+                            <button onClick={() => setView('ADMIN')} className="bg-white/10 hover:bg-white/20 backdrop-blur-md border border-white/20 text-white px-3 py-1.5 rounded-lg text-xs font-medium transition">
+                                Dashboard
+                            </button>
+                        </div>
+
                         <div className="absolute top-6 left-6 z-10">
                             <div className="bg-white/10 backdrop-blur-md border border-white/20 text-white px-4 py-1.5 rounded-full text-sm font-medium flex items-center gap-2">
                                 <div className={"w-2 h-2 rounded-full " + (status === 'ACTIVE' ? "bg-red-500 animate-pulse" : "bg-slate-400")}></div>
@@ -473,4 +548,3 @@ app.get('/', (req, res) => {
 app.listen(port, () => {
     console.log("Server running at http://localhost:" + port);
 });
-
