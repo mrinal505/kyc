@@ -101,7 +101,7 @@ async function getGeminiResponse(history, userText) {
     if (!GEMINI_API_KEY) return { next_question: "System Error: API Key missing.", kyc_status: "CONTINUE" };
 
     // ✅ MODEL SET TO gemini-2.5-flash AS REQUESTED
-    const url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=" + GEMINI_API_KEY;
+    const url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-lite:generateContent?key=" + GEMINI_API_KEY;
     
     const contents = history.map(h => ({
         role: h.role === 'model' ? 'model' : 'user',
@@ -473,3 +473,4 @@ app.get('/', (req, res) => {
 app.listen(port, () => {
     console.log("Server running at http://localhost:" + port);
 });
+
