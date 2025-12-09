@@ -21,7 +21,7 @@ A lightweight, single-file AI Agent that performs real-time Video KYC (Know Your
 
 1.  **Clone the repository**
     ```bash
-    git clone [https://github.com/YOUR_USERNAME/your-repo-name.git](https://github.com/YOUR_USERNAME/your-repo-name.git)
+    git clone [https://github.com/mrinal505/kyc.git](https://github.com/mrinal505/kyc.git)
     cd your-repo-name
     ```
 
