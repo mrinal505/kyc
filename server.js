@@ -1,8 +1,9 @@
 // =============================================================
-//  ONRAMP.MONEY AI KYC AGENT (ULTIMATE PRO VERSION)
-//  - AI Leads the Conversation
-//  - Robust Error Handling (No Crashing)
-//  - MongoDB & Video Recording
+//  ONRAMP.MONEY AI KYC AGENT (ULTIMATE FIXED VERSION)
+//  - Model: gemini-2.5-flash (User Preserved)
+//  - Fixes DB "Invisible Data" (Using $each)
+//  - Limits Questions (Max 3)
+//  - Robust JSON Parsing
 // =============================================================
 
 const express = require('express');
@@ -19,23 +20,29 @@ const port = process.env.PORT || 3000;
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY; 
 const MONGO_URI = process.env.MONGO_URI; 
 
-// --- BRAIN: THE INVESTIGATOR PERSONA ---
+// --- BRAIN: THE INVESTIGATOR PERSONA (SHORT & FAST) ---
 const SYSTEM_INSTRUCTION = `
-ROLE: You are a Senior Financial Crime Investigator.
-GOAL: Detect fraud (Pig Butchering, Money Mules, Coercion).
-TONE: Professional, Firm, but Polite.
-LANGUAGE: Adapt to the user's language (English or Hindi).
+ROLE: Senior Financial Crime Investigator.
+GOAL: Detect fraud (Pig Butchering, Money Mules) FAST.
 
-RULES:
-1. YOU ask the questions. Do not let the user lead.
-2. SHORT questions (1-2 sentences max).
-3. PROBE vague answers. If they say "investment", ask "Who recommended it?".
-4. DETECT COERCION: If they look away or pause, ask "Is someone telling you what to say?".
+CRITICAL RULES:
+1. YOU ASK THE QUESTIONS. Do not let the user lead.
+2. ASK EXACTLY 3 QUESTIONS TOTAL. Then decide.
+3. KEEP IT SHORT. One sentence only.
+
+LOGIC:
+- Q1: Purpose of transaction?
+- Q2: Who recommended this? (Probe for "Online Friend/Teacher")
+- Q3: Did they promise guaranteed returns?
+
+DECISION:
+- If mentions "Telegram Task", "Job", "Mentor", "Profits" -> REJECT.
+- If generic investment -> APPROVE.
 
 OUTPUT FORMAT (JSON ONLY):
 {
-  "next_question": "Your next question here",
-  "kyc_status": "CONTINUE" (or "APPROVED" / "REJECTED"),
+  "next_question": "Text",
+  "kyc_status": "CONTINUE" | "APPROVED" | "REJECTED",
   "risk_flag": boolean
 }
 `;
@@ -45,10 +52,8 @@ app.use(cors());
 app.use(express.json({ limit: '50mb' })); 
 app.use('/uploads', express.static('uploads'));
 
-// Ensure uploads directory exists
 if (!fs.existsSync('uploads')) fs.mkdirSync('uploads');
 
-// Configure Multer for Video Storage
 const storage = multer.diskStorage({
     destination: (req, file, cb) => cb(null, 'uploads/'),
     filename: (req, file, cb) => cb(null, 'kyc-' + Date.now() + '.webm')
@@ -60,8 +65,6 @@ if (MONGO_URI) {
     mongoose.connect(MONGO_URI)
         .then(() => console.log("✅ Connected to MongoDB"))
         .catch(err => console.error("❌ MongoDB Error:", err));
-} else {
-    console.warn("⚠️ MONGO_URI missing. Database features will be skipped.");
 }
 
 // --- DATABASE SCHEMA ---
@@ -71,31 +74,43 @@ const SessionSchema = new mongoose.Schema({
     status: String,
     riskFlag: Boolean,
     language: String,
-    transcript: [{ sender: String, text: String, time: String }],
+    transcript: [{ 
+        sender: String, 
+        text: String, 
+        time: String 
+    }],
     videoPath: String
 });
 
 const Session = mongoose.model('Session', SessionSchema);
 
-// --- AI LOGIC (ROBUST VERSION) ---
-async function getGeminiResponse(history, userText) {
-    if (!GEMINI_API_KEY) {
-        console.error("❌ API Key Missing");
-        return { next_question: "System Error: API Key missing.", kyc_status: "CONTINUE", risk_flag: false };
+// --- HELPER: CLEAN JSON ---
+function cleanAndParseJSON(text) {
+    const firstOpen = text.indexOf('{');
+    const lastClose = text.lastIndexOf('}');
+    if (firstOpen === -1 || lastClose === -1) return null;
+    try {
+        return JSON.parse(text.substring(firstOpen, lastClose + 1));
+    } catch (e) {
+        return null;
     }
+}
 
+// --- AI LOGIC ---
+async function getGeminiResponse(history, userText) {
+    if (!GEMINI_API_KEY) return { next_question: "System Error: API Key missing.", kyc_status: "CONTINUE" };
+
+    // ✅ MODEL SET TO gemini-2.5-flash AS REQUESTED
     const url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=" + GEMINI_API_KEY;
     
-    // Construct Prompt
     const contents = history.map(h => ({
         role: h.role === 'model' ? 'model' : 'user',
         parts: h.parts
     }));
     
-    // Add User Input with strict JSON instruction
     contents.push({ 
         role: "user", 
-        parts: [{ text: userText + " (Reply valid JSON: {next_question, kyc_status, risk_flag})" }] 
+        parts: [{ text: userText + " (IMPORTANT: Return pure JSON only. Keep it short.)" }] 
     });
 
     try {
@@ -107,23 +122,28 @@ async function getGeminiResponse(history, userText) {
 
         const data = await response.json();
 
-        // Safety Checks
         if (data.error) {
             console.error("❌ GOOGLE API ERROR:", data.error.message);
-            return { next_question: "Connection issue. Please repeat.", kyc_status: "CONTINUE", risk_flag: false };
+            return { next_question: "Connection error. Please wait.", kyc_status: "CONTINUE", risk_flag: false };
         }
         
         if (!data.candidates || !data.candidates[0]) {
-            return { next_question: "I didn't hear you clearly.", kyc_status: "CONTINUE", risk_flag: false };
+            return { next_question: "I didn't hear you.", kyc_status: "CONTINUE", risk_flag: false };
         }
 
         let raw = data.candidates[0].content.parts[0].text;
-        raw = raw.replace(/```json/g, '').replace(/```/g, '').trim();
-        return JSON.parse(raw);
+        const cleaned = cleanAndParseJSON(raw);
+        
+        if (!cleaned) {
+             console.error("❌ JSON Parse Fail. Raw:", raw);
+             return { next_question: "Could you repeat that?", kyc_status: "CONTINUE", risk_flag: false };
+        }
+
+        return cleaned;
 
     } catch (e) {
-        console.error("❌ PARSE/NET ERROR:", e.message);
-        return { next_question: "Technical glitch. Let's continue.", kyc_status: "CONTINUE", risk_flag: false };
+        console.error("❌ NETWORK ERROR:", e.message);
+        return { next_question: "System glitch.", kyc_status: "CONTINUE", risk_flag: false };
     }
 }
 
@@ -131,17 +151,13 @@ const activeSessions = {};
 
 // --- ROUTES ---
 
-// 1. START: Initializes the "Investigator Brain"
 app.post('/api/start', async (req, res) => {
     const { language } = req.body;
     const sessionId = Date.now().toString();
-    
-    // The FIRST question the AI asks (It takes charge immediately)
     const initialQ = language === 'hi-IN' 
-        ? "नमस्ते. वेरिफिकेशन शुरू करने के लिए, कृपया अपना पूरा नाम बताएं?" 
-        : "Hello. To start verification, please state your full name?";
+        ? "नमस्ते. वेरिफिकेशन के लिए अपना नाम बताएं?" 
+        : "Hello. Please state your name for verification?";
     
-    // Setup DB
     if (MONGO_URI) {
         try {
             const newSession = new Session({
@@ -152,51 +168,54 @@ app.post('/api/start', async (req, res) => {
                 riskFlag: false
             });
             await newSession.save();
+            console.log(`📝 Session ${sessionId} Created in DB`);
         } catch(e) { console.error("DB Save Error", e); }
     }
 
-    // Setup AI Memory with the System Instruction
     activeSessions[sessionId] = { 
         history: [
-            { role: "user", parts: [{ text: SYSTEM_INSTRUCTION }] }, // Inject Persona
-            { role: "model", parts: [{ text: JSON.stringify({ next_question: initialQ }) }] } // Inject First Q
+            { role: "user", parts: [{ text: SYSTEM_INSTRUCTION }] },
+            { role: "model", parts: [{ text: JSON.stringify({ next_question: initialQ }) }] }
         ] 
     };
 
     res.json({ sessionId, next_question: initialQ, language_code: language });
 });
 
-// 2. PROCESS: Handles the back-and-forth
 app.post('/api/process', async (req, res) => {
     const { sessionId, userText } = req.body;
     if (!activeSessions[sessionId]) return res.status(404).json({ error: "Session expired" });
 
-    // AI THINKS AND REPLIES
     const aiResp = await getGeminiResponse(activeSessions[sessionId].history, userText);
     
-    // UPDATE MEMORY
     activeSessions[sessionId].history.push({ role: "user", parts: [{ text: userText }] });
     activeSessions[sessionId].history.push({ role: "model", parts: [{ text: JSON.stringify(aiResp) }] });
 
-    // UPDATE DB
     if (MONGO_URI) {
         try {
-            await Session.findOneAndUpdate({ sessionId }, {
-                $push: { 
-                    transcript: [
-                        { sender: 'USER', text: userText, time: new Date().toISOString() },
-                        { sender: 'AI', text: aiResp.next_question, time: new Date().toISOString() }
-                    ]
+            // ✅ FIX: Using $each to push multiple items correctly so you can see them in Atlas
+            await Session.findOneAndUpdate(
+                { sessionId }, 
+                {
+                    $push: { 
+                        transcript: { 
+                            $each: [
+                                { sender: 'USER', text: userText, time: new Date().toISOString() },
+                                { sender: 'AI', text: aiResp.next_question, time: new Date().toISOString() }
+                            ]
+                        }
+                    },
+                    $set: { status: aiResp.kyc_status, riskFlag: aiResp.risk_flag }
                 },
-                $set: { status: aiResp.kyc_status, riskFlag: aiResp.risk_flag }
-            });
+                { new: true } 
+            );
+            console.log(`📝 DB Updated for ${sessionId}`);
         } catch(e) { console.error("DB Update Error", e); }
     }
 
     res.json(aiResp);
 });
 
-// 3. UPLOAD: Saves the video evidence
 app.post('/api/upload-video', upload.single('video'), async (req, res) => {
     const { sessionId } = req.body;
     if (req.file) {
@@ -454,5 +473,3 @@ app.get('/', (req, res) => {
 app.listen(port, () => {
     console.log("Server running at http://localhost:" + port);
 });
-
-
