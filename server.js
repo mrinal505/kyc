@@ -25,7 +25,7 @@ const CONFIG = {
     GEMINI_KEY: process.env.GEMINI_API_KEY,
     MONGO_URI: process.env.MONGO_URI,
     UPLOAD_DIR: 'uploads/',
-    MODEL_NAME: 'gemini-1.5-flash', // Updated to stable version
+    MODEL_NAME: 'gemini-2.5-flash-lite', // Updated to stable version
 };
 
 // Fail fast if critical keys are missing
@@ -285,3 +285,4 @@ connectDB().then(() => {
         console.log(`🚀 Server running on http://localhost:${CONFIG.PORT}`);
     });
 });
+
